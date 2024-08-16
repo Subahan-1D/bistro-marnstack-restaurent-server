@@ -34,6 +34,9 @@ async function run() {
       .collection("reviews");
     const cartCollection = client.db("bistroRestaurantDB").collection("carts");
     const userCollection = client.db("bistroRestaurantDB").collection("users");
+    const paymentCollection = client
+      .db("bistroRestaurantDB")
+      .collection("payments");
 
     // jwt related api
 
@@ -200,7 +203,18 @@ async function run() {
       res.send(result);
     });
 
-    // payment intent
+    // payment intent api all 
+
+    // payment history specie
+    app.get("/payments/:email",verifyToken, async (req, res) => {
+      const query = { email : req.params.email}
+      if(req.params.email !== req.decoded.email){
+        return res.status(403).send({message : 'forbidden access'})
+      }
+      const result = await paymentCollection.find(query).toArray()
+      res.send(result)
+    });
+
     app.post("/create-payment-intent", async (req, res) => {
       const { price } = req.body;
       const amount = parseInt(price * 100);
@@ -214,6 +228,23 @@ async function run() {
       res.send({
         clientSecret: paymentIntent.client_secret,
       });
+    });
+
+    // payment related api
+    app.post("/payments", async (req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+
+      // carefully delete  each item from the cart
+      console.log("payment information", payment);
+
+      const query = {
+        _id: {
+          $in: payment.cartIds.map((id) => new ObjectId(id)),
+        },
+      };
+      const deleteResult = await cartCollection.deleteMany(query);
+      res.send({ paymentResult, deleteResult });
     });
 
     // Send a ping to confirm a successful connection
