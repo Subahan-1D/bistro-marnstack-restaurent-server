@@ -3,14 +3,53 @@ const cors = require("cors");
 const app = express();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const jwt = require("jsonwebtoken");
+require("dotenv").config();
+const nodemailer = require("nodemailer");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 9000;
 
 // config
-require("dotenv").config();
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
 //MIDDLEWARE
 app.use(cors());
 app.use(express.json());
+
+// send email
+const sendEmail = (emailAddress, emailData) => {
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false, // true for port 465, false for other ports
+    auth: {
+      user: process.env.TRANSPORTER_EMAIL,
+      pass: process.env.TRANSPORTER_PASS,
+    },
+  });
+  // verify transporter
+  transporter.verify(function (error, success) {
+    if (error) {
+      console.log(error);
+    } else {
+      console.log("Server is ready to take our messages");
+    }
+  });
+
+  const mailBody = {
+    from: `"BistroBoss" <${process.env.TRANSPORTER_EMAIL}>`, // sender address
+    to: emailAddress, // list of receivers
+    subject: emailData.subject, // Subject line
+    html: emailData.message, // html body
+  };
+  // send mail with defined transport object
+  transporter.sendMail(mailBody, (error, info) => {
+    if (error) {
+      console.log(error);
+    } else {
+      console.log("Email Send :" + info.response);
+    }
+  });
+};
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.yqmtelq.mongodb.net/?appName=Cluster0`;
 
@@ -244,10 +283,20 @@ async function run() {
         },
       };
       const deleteResult = await cartCollection.deleteMany(query);
+      // send email to restaurant user
+      sendEmail(payment?.admin?.email,{
+        subject: "Thank You For Your Order",
+        message: `You have successfully you order confirm . Transaction Id : ${payment?.transactionId}`,
+      });
+      // sendEmail(payment?.admin?.email, {
+      //   subject: "Product is Sell Confirm",
+      //   message: `Get ready to welcome . ${payment?.user?.name}`,
+      // });
+
       res.send({ paymentResult, deleteResult });
     });
 
-    // stats analytics
+    // stats admin analytics
     app.get("/admin-stats", verifyToken, verifyAdmin, async (req, res) => {
       const users = await userCollection.estimatedDocumentCount();
       const menuItems = await menuCollection.estimatedDocumentCount();
@@ -272,9 +321,72 @@ async function run() {
 
       res.send({ users, menuItems, orders, revenue });
     });
+     app.get("/order-stats", verifyToken, verifyAdmin, async (req, res) => {
+       const result = await paymentCollection
+         .aggregate([
+           {
+             $unwind: "$menuItemIds",
+           },
+           {
+             $lookup: {
+               from: "menu",
+               localField: "menuItemIds",
+               foreignField: "_id",
+               as: "menuItems",
+             },
+           },
+           {
+             $unwind: "$menuItems",
+           },
+           {
+             $group: {
+               _id: "$menuItems.category",
+               quantity: {
+                 $sum: 1,
+               },
+               revenue: {
+                 $sum: "$menuItems.price",
+               },
+             },
+           },
+           {
+             $project: {
+               _id: 0,
+               category: "$_id",
+               quantity: "$quantity",
+               revenue: "$revenue",
+             },
+           },
+         ])
+         .toArray();
+       res.send(result);
+     });
+    // user starts
+    app.get("/users-stats", async (req, res) => {
+      const orders = await paymentCollection.estimatedDocumentCount();
+      // this is not the best way
+      // const payments = await paymentCollection.find().toArray();
+      // const revenue = payments.reduce((total,payment) => total + payment.price,0)
+      // revenue to pipeline
+      const result = await paymentCollection
+        .aggregate([
+          {
+            $group: {
+              _id: null,
+              totalRevenue: {
+                $sum: "$price",
+              },
+            },
+          },
+        ])
+        .toArray();
+      const revenue = result.length > 0 ? result[0].totalRevenue : 0;
+
+      res.send({  orders, revenue });
+    });
 
     // using aggregate pipeline
-    app.get("/order-stats",verifyToken, verifyAdmin, async (req, res) => {
+    app.get("/order-stat", async (req, res) => {
       const result = await paymentCollection
         .aggregate([
           {
@@ -303,17 +415,18 @@ async function run() {
             },
           },
           {
-            $project :{
+            $project: {
               _id: 0,
-              category: '$_id',
-              quantity:'$quantity',
-              revenue: '$revenue'
-            }
-          }
+              category: "$_id",
+              quantity: "$quantity",
+              revenue: "$revenue",
+            },
+          },
         ])
         .toArray();
       res.send(result);
     });
+   
     await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
